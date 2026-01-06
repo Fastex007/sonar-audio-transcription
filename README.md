@@ -307,9 +307,6 @@ See [docs/ML_MODELS.md](docs/ML_MODELS.md) for details.
 7. Set up nginx reverse proxy
 8. Configure SSL certificates
 
-## License
-
-[Your License Here]
 
 ## Contributing
 
