@@ -1,0 +1,133 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: sonar_postgres
+    environment:
+      - POSTGRES_DB=sonar
+      - POSTGRES_USER=sonar
+      - POSTGRES_PASSWORD=sonar_dev_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis (для Celery)
+  redis:
+    image: redis:7-alpine
+    container_name: sonar_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Django HTTP API Server
+  api:
+    build: .
+    container_name: sonar_api
+    command: sh -c "cd /app/app && python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - .:/app
+      - media_data:/app/media
+      - static_data:/app/staticfiles
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=True
+      - DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0
+      - DJANGO_SECRET_KEY=django-insecure-docker-dev-key-change-in-production
+      - DATABASE_URL=postgresql://sonar:sonar_dev_password@postgres:5432/sonar
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/recordings')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Django WebSocket Server (Daphne)
+  ws:
+    build: .
+    container_name: sonar_websocket
+    command: sh -c "cd /app/app && daphne -b 0.0.0.0 -p 8001 config.asgi:application"
+    volumes:
+      - .:/app
+      - media_data:/app/media
+    ports:
+      - "8001:8001"
+    environment:
+      - DEBUG=True
+      - DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0
+      - DJANGO_SECRET_KEY=django-insecure-docker-dev-key-change-in-production
+      - DATABASE_URL=postgresql://sonar:sonar_dev_password@postgres:5432/sonar
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Celery Worker (STT + Diarization)
+  worker:
+    build: .
+    container_name: sonar_worker
+    command: sh -c "cd /app/app && celery -A config worker --loglevel=info --pool=solo"
+    volumes:
+      - .:/app
+      - media_data:/app/media
+      - models_cache:/root/.cache  # Модели сохраняются здесь
+    environment:
+      - DEBUG=True
+      - DJANGO_SECRET_KEY=django-insecure-docker-dev-key-change-in-production
+      - DATABASE_URL=postgresql://sonar:sonar_dev_password@postgres:5432/sonar
+      - REDIS_URL=redis://redis:6379/0
+      - HF_HOME=/root/.cache/huggingface  # Для pyannote
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      - HF_TOKEN=${HF_TOKEN:-}  # Токен HuggingFace (опционально)
+      - PYTORCH_ENABLE_MPS_FALLBACK=1  # Отключить MPS в Docker
+      - CUDA_VISIBLE_DEVICES=""  # Форсировать использование CPU
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    # Раскомментируйте если есть NVIDIA GPU
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  postgres_data:
+    driver: local
+  media_data:
+    driver: local
+  static_data:
+    driver: local
+  models_cache:
+    driver: local  # Модели будут сохраняться между пересборками
+
+networks:
+  default:
+    name: sonar_network
